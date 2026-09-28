@@ -20,13 +20,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # A DLL must match the bitness of the process that loads it.
-        target:
-          - x86_64-pc-windows-msvc
-          - i686-pc-windows-msvc
+        include:
+          # A DLL must match the bitness of the process that loads it.
+          - target: x86_64-pc-windows-msvc
+            arch: x64
+          - target: i686-pc-windows-msvc
+            arch: x86
 
     steps:
       - uses: actions/checkout@v4
+
+      # rustc cannot always locate link.exe on the runner, vcvarsall makes sure
+      # the MSVC toolset (link.exe, LIB, INCLUDE) is on the environment.
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -42,13 +51,8 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $arch = switch ("${{ matrix.target }}") {
-            "x86_64-pc-windows-msvc" { "x64" }
-            "i686-pc-windows-msvc" { "x86" }
-            default { "${{ matrix.target }}" }
-          }
           $ref = ("${{ github.ref_name }}" -replace '[\\/:*?"<>|]', '_')
-          $name = "ProcessAudioCapture-$arch-$ref"
+          $name = "ProcessAudioCapture-${{ matrix.arch }}-$ref"
           $out = "target/${{ matrix.target }}/release"
 
           New-Item -ItemType Directory -Path dist | Out-Null
