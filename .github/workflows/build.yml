@@ -90,18 +90,18 @@ jobs:
           merge-multiple: true
 
       # Re-running a tag would otherwise leave the assets of the previous run
-      # attached to the release.
-      - name: Drop assets of the previous run
+      # attached to the release, so start from a clean release.
+      - name: Reset release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release view "$tag" --json assets --jq '.assets[].name' | while read -r name; do
-              if [ -n "$name" ]; then
-                gh release delete-asset "$tag" "$name" --yes
-              fi
-            done
+            echo "existing assets:"
+            gh release view "$tag" --json assets --jq '.assets[].name' || true
+            gh release delete "$tag" --yes --cleanup-tag=false || echo "release delete failed"
+          else
+            echo "no existing release for $tag"
           fi
 
       - name: Publish release
