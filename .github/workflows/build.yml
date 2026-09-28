@@ -1,0 +1,90 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # A DLL must match the bitness of the process that loads it.
+        target:
+          - x86_64-pc-windows-msvc
+          - i686-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $arch = switch ("${{ matrix.target }}") {
+            "x86_64-pc-windows-msvc" { "x64" }
+            "i686-pc-windows-msvc" { "x86" }
+            default { "${{ matrix.target }}" }
+          }
+          $ref = ("${{ github.ref_name }}" -replace '[\\/:*?"<>|]', '_')
+          $name = "ProcessAudioCapture-$arch-$ref"
+          $out = "target/${{ matrix.target }}/release"
+
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item "$out/ProcessAudioCapture.dll" dist/
+          if (Test-Path "$out/ProcessAudioCapture.pdb") {
+            Copy-Item "$out/ProcessAudioCapture.pdb" dist/
+          }
+          Copy-Item -Path include/process_audio_capture.h -Destination dist/
+          Copy-Item -Path README.md, README_CN.md -Destination dist/
+
+          Compress-Archive -Path dist/* -DestinationPath "$name.zip"
+          Write-Output "packed $name.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProcessAudioCapture-${{ matrix.target }}
+          path: "*.zip"
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packages/*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
