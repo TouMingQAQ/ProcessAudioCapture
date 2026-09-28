@@ -25,6 +25,7 @@ use windows::{
                 AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
                 AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
                 IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
+                IActivateAudioInterfaceCompletionHandler_Impl,
                 IAudioCaptureClient, IAudioClient, IAudioClient2,
                 PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
                 VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
@@ -37,7 +38,9 @@ use windows::{
                 StructuredStorage::PROPVARIANT,
             },
             Diagnostics::Debug::OutputDebugStringA,
-            Threading::{CreateEventW, SetEvent, WaitForMultipleObjects},
+            Threading::{
+                CreateEventW, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
+            },
             Variant::VT_BLOB,
         },
     },
@@ -246,7 +249,11 @@ fn activate_with_event(pid: u32, event: HANDLE) -> Result<IAudioClient> {
 
     let status = *state.result.lock().unwrap_or_else(|error| error.into_inner());
     status.ok()?;
-    state.client.lock().unwrap_or_else(|error| error.into_inner()).take().ok_or(Error::from_hresult(E_FAIL))
+
+    // Bind the guard's result before returning, so the temporary does not
+    // outlive `state`.
+    let client = state.client.lock().unwrap_or_else(|error| error.into_inner()).take();
+    client.ok_or(Error::from_hresult(E_FAIL))
 }
 
 /// Configures the activated client and runs the capture loop.

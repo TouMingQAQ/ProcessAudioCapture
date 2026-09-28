@@ -13,9 +13,10 @@ dependencies = [
 
 [[package]]
 name = "process_audio_capture"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "windows",
+ "windows-core",
 ]
 
 [[package]]

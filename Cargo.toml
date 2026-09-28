@@ -10,6 +10,9 @@ name = "ProcessAudioCapture"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# `#[implement]` expands to `::windows_core::...` paths, so the facade crate
+# alone is not enough.
+windows-core = "0.61"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Media_Audio",

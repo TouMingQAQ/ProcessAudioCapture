@@ -16,6 +16,9 @@
 //! an unwinding panic can never cross the FFI boundary.
 
 #![cfg(windows)]
+// The crate name is intentionally PascalCase so the produced artifact keeps
+// the ProcessAudioCapture.dll file name.
+#![allow(non_snake_case)]
 
 mod capture;
 
