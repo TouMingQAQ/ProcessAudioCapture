@@ -52,6 +52,13 @@ use crate::{
 /// Requested loopback buffer duration, in 100 ns units (20 ms).
 const BUFFER_DURATION_HNS: i64 = 200_000;
 
+/// Sample rate every process loopback stream is delivered in.
+pub(crate) const STREAM_SAMPLE_RATE: u32 = 48_000;
+/// Channel count every process loopback stream is delivered in.
+pub(crate) const STREAM_CHANNELS: u16 = 2;
+/// Bits per sample every process loopback stream is delivered in.
+pub(crate) const STREAM_BITS: u16 = 32;
+
 /// Upper bound for a single wait, so a missed event cannot stall the thread.
 const WAIT_SLICE_MS: u32 = 200;
 
@@ -74,6 +81,9 @@ pub(crate) struct Shared {
     callback: PacAudioCallback,
     user_data: *mut c_void,
     activation: Mutex<i32>,
+    /// Terminal error of the capture thread: [`PAC_OK`] while it runs and after
+    /// a normal stop, a failure code when streaming died on its own.
+    outcome: Mutex<i32>,
 }
 
 // The raw pointers are only handed back to the callback supplied by the caller.
@@ -87,12 +97,29 @@ impl Shared {
         callback: PacAudioCallback,
         user_data: *mut c_void,
     ) -> Self {
-        Self { stop, ready, callback, user_data, activation: Mutex::new(PAC_OK) }
+        Self {
+            stop,
+            ready,
+            callback,
+            user_data,
+            activation: Mutex::new(PAC_OK),
+            outcome: Mutex::new(PAC_OK),
+        }
     }
 
     /// Outcome of the activation phase, written before `ready` is signalled.
     pub(crate) fn activation_code(&self) -> i32 {
         *self.activation.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// How the capture thread ended: [`PAC_OK`] while it runs and after a
+    /// normal stop, otherwise the failure it ran into.
+    pub(crate) fn outcome(&self) -> i32 {
+        *self.outcome.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn set_outcome(&self, code: i32) {
+        *self.outcome.lock().unwrap_or_else(|error| error.into_inner()) = code;
     }
 
     fn report(&self, code: i32) {
@@ -116,6 +143,9 @@ pub(crate) fn run(pid: u32, shared: &Shared) {
             shared.report(PAC_OK);
             if let Err(error) = stream(&client, shared) {
                 log_error("streaming", &error);
+                // The stream ended without anyone asking for it, so remember
+                // it: that is how a host tells "stopped" from "died".
+                shared.set_outcome(PAC_E_INTERNAL);
             }
         }
         Err(error) => {
@@ -265,20 +295,17 @@ fn activate_with_event(pid: u32, event: HANDLE) -> Result<IAudioClient> {
 /// 构造 —— 微软的 ApplicationLoopback 示例同样是硬编码这份格式。
 /// 进程回环固定交付 32-bit IEEE float PCM。
 fn capture_format() -> WAVEFORMATEXTENSIBLE {
-    const CHANNELS: u16 = 2;
-    const SAMPLE_RATE: u32 = 48_000;
-    const BITS: u16 = 32;
-    let block_align = CHANNELS * BITS / 8;
+    let block_align = STREAM_CHANNELS * STREAM_BITS / 8;
 
     let mut format: WAVEFORMATEXTENSIBLE = unsafe { std::mem::zeroed() };
     format.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE_TAG;
-    format.Format.nChannels = CHANNELS;
-    format.Format.nSamplesPerSec = SAMPLE_RATE;
-    format.Format.nAvgBytesPerSec = SAMPLE_RATE * block_align as u32;
+    format.Format.nChannels = STREAM_CHANNELS;
+    format.Format.nSamplesPerSec = STREAM_SAMPLE_RATE;
+    format.Format.nAvgBytesPerSec = STREAM_SAMPLE_RATE * block_align as u32;
     format.Format.nBlockAlign = block_align;
-    format.Format.wBitsPerSample = BITS;
+    format.Format.wBitsPerSample = STREAM_BITS;
     format.Format.cbSize = (size_of::<WAVEFORMATEXTENSIBLE>() - size_of::<WAVEFORMATEX>()) as u16;
-    format.Samples.wValidBitsPerSample = BITS;
+    format.Samples.wValidBitsPerSample = STREAM_BITS;
     format.dwChannelMask = 0x3;
     format.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
     format

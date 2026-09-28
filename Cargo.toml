@@ -13,9 +13,14 @@ crate-type = ["cdylib", "rlib"]
 # `#[implement]` expands to `::windows_core::...` paths, so the facade crate
 # alone is not enough.
 windows-core = "0.61"
+# WinRT async operations are a separate crate since 0.61; the generated SMTC
+# signatures use it, and its `std` feature is what makes `get()` blocking.
+windows-future = "0.2"
+rustfft = "6"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
     "Win32_Media_Multimedia",
     "Win32_Security",
     "Win32_System_Com",
@@ -23,6 +28,9 @@ windows = { version = "0.61", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Threading",
     "Win32_System_Variant",
+    "Win32_UI_WindowsAndMessaging",
+    # System Media Transport Controls.
+    "Media_Control",
 ] }
 
 [profile.release]
