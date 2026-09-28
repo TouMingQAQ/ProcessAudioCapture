@@ -61,29 +61,19 @@ jobs:
             exit 1
           }
 
-      - name: Package
+      - name: Collect DLL
         shell: pwsh
         run: |
-          $ref = ("${{ github.ref_name }}" -replace '[\\/:*?"<>|]', '_')
-          $name = "ProcessAudioCapture-${{ matrix.arch }}-$ref"
           $out = "target/${{ matrix.target }}/release"
-
           New-Item -ItemType Directory -Path dist | Out-Null
-          Copy-Item "$out/ProcessAudioCapture.dll" dist/
-          if (Test-Path "$out/ProcessAudioCapture.pdb") {
-            Copy-Item "$out/ProcessAudioCapture.pdb" dist/
-          }
-          Copy-Item -Path include/process_audio_capture.h -Destination dist/
-          Copy-Item -Path README.md, README_CN.md -Destination dist/
+          Copy-Item -Path "$out/ProcessAudioCapture.dll" -Destination "dist/ProcessAudioCapture-${{ matrix.arch }}.dll"
+          Get-ChildItem dist | Select-Object Name, Length
 
-          Compress-Archive -Path dist/* -DestinationPath "$name.zip"
-          Write-Output "packed $name.zip"
-
-      - name: Upload artifact
+      - name: Upload DLL
         uses: actions/upload-artifact@v4
         with:
           name: ProcessAudioCapture-${{ matrix.target }}
-          path: "*.zip"
+          path: "dist/*.dll"
           if-no-files-found: error
 
   release:
@@ -99,9 +89,24 @@ jobs:
           path: packages
           merge-multiple: true
 
+      # Re-running a tag would otherwise leave the assets of the previous run
+      # attached to the release.
+      - name: Drop assets of the previous run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release view "$tag" --json assets --jq '.assets[].name' | while read -r name; do
+              if [ -n "$name" ]; then
+                gh release delete-asset "$tag" "$name" --yes
+              fi
+            done
+          fi
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: packages/*.zip
+          files: packages/*.dll
           generate_release_notes: true
           fail_on_unmatched_files: true
