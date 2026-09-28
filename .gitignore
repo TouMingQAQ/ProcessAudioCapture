@@ -1,0 +1,33 @@
+# Rust build output
+/target/
+
+# Rust backup files
+**/*.rs.bk
+
+# MSVC / linker intermediate artifacts produced by the C sample
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.exp
+
+# Captured audio written by the samples
+*.wav
+
+# .NET build output (samples/csharp)
+/samples/csharp/bin/
+/samples/csharp/obj/
+
+# IDE and editor state
+.vs/
+.idea/
+*.user
+*.suo
+*.rsuser
+
+# OS junk
+Thumbs.db
+Desktop.ini
+
+# Cargo.lock is intentionally tracked: this crate ships a cdylib, so the
+# resolved dependency set is part of the build that consumers get.

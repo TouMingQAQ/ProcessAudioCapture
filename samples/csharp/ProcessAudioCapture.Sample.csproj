@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>ProcessAudioCapture.Sample</RootNamespace>
+    <AssemblyName>ProcessAudioCapture.Sample</AssemblyName>
+  </PropertyGroup>
+
+</Project>
