@@ -19,22 +19,20 @@ use windows::{
         Foundation::{CloseHandle, HANDLE, RPC_E_CHANGED_MODE, WAIT_OBJECT_0, WAIT_TIMEOUT},
         Media::{
             Audio::{
-                ActivateAudioInterfaceAsync, AudioCategory_Other, AudioClientProperties,
-                AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+                ActivateAudioInterfaceAsync, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
                 AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
                 AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
                 IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
-                IActivateAudioInterfaceCompletionHandler_Impl,
-                IAudioCaptureClient, IAudioClient, IAudioClient2,
+                IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient,
                 PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
                 VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
             },
-            Multimedia::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT},
+            Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
         },
         System::{
             Com::{
-                CoInitializeEx, CoTaskMemFree, CoUninitialize, BLOB, COINIT_MULTITHREADED,
+                CoInitializeEx, CoUninitialize, BLOB, COINIT_MULTITHREADED,
                 StructuredStorage::PROPVARIANT,
             },
             Diagnostics::Debug::OutputDebugStringA,
@@ -59,9 +57,6 @@ const WAIT_SLICE_MS: u32 = 200;
 
 /// `WAVEFORMATEXTENSIBLE` format tag.
 const WAVE_FORMAT_EXTENSIBLE_TAG: u16 = 0xFFFE;
-
-/// `AUDCLNT_E_UNSUPPORTED_FORMAT`.
-const AUDCLNT_E_UNSUPPORTED_FORMAT: HRESULT = HRESULT(0x88890008u32 as i32);
 
 /// `E_FAIL`, used when COM succeeds but hands back nothing usable.
 const E_FAIL: HRESULT = HRESULT(0x80004005u32 as i32);
@@ -213,7 +208,14 @@ fn activate_with_event(pid: u32, event: HANDLE) -> Result<IAudioClient> {
     };
 
     // ActivateAudioInterfaceAsync takes the parameters as a PROPVARIANT blob.
-    let mut property = PROPVARIANT::default();
+    //
+    // `PROPVARIANT` 在 windows crate 里实现了 `Drop`，会调用 `PropVariantClear`。
+    // 对 `VT_BLOB` 而言它会用 `CoTaskMemFree` 释放 `pBlobData`，而这里的
+    // `pBlobData` 指向栈上的 `parameters` —— 释放一个栈地址会直接摧毁堆，
+    // 宿主进程随即以 STATUS_HEAP_CORRUPTION (0xC0000374) 崩溃。
+    // 这个 blob 是调用方自有的栈内存，没有任何东西需要释放，用 ManuallyDrop
+    // 跳过一次根本不该发生的释放。
+    let mut property = std::mem::ManuallyDrop::new(PROPVARIANT::default());
     unsafe {
         let value = &mut *property.Anonymous.Anonymous;
         value.vt = VT_BLOB;
@@ -226,7 +228,7 @@ fn activate_with_event(pid: u32, event: HANDLE) -> Result<IAudioClient> {
     let handler: IActivateAudioInterfaceCompletionHandler =
         ActivationHandler { event, state: Arc::clone(&state) }.into();
 
-    let property_ptr: *const PROPVARIANT = &property;
+    let property_ptr: *const PROPVARIANT = &*property;
     let operation = unsafe {
         ActivateAudioInterfaceAsync(
             VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
@@ -256,46 +258,53 @@ fn activate_with_event(pid: u32, event: HANDLE) -> Result<IAudioClient> {
     client.ok_or(Error::from_hresult(E_FAIL))
 }
 
-/// Configures the activated client and runs the capture loop.
-fn stream(client: &IAudioClient, shared: &Shared) -> Result<()> {
-    let client2: IAudioClient2 = client.cast()?;
-    let properties = AudioClientProperties {
-        cbSize: size_of::<AudioClientProperties>() as u32,
-        bIsOffload: false.into(),
-        eCategory: AudioCategory_Other,
-        ..Default::default()
-    };
-    unsafe { client2.SetClientProperties(&properties)? };
+/// 构造进程回环需要的捕获格式。
+///
+/// 进程回环客户端**不实现** `IAudioClient2`（`SetClientProperties` 会返回
+/// `E_NOINTERFACE`），`GetMixFormat` 也会返回 `E_NOTIMPL`，所以格式必须自己
+/// 构造 —— 微软的 ApplicationLoopback 示例同样是硬编码这份格式。
+/// 进程回环固定交付 32-bit IEEE float PCM。
+fn capture_format() -> WAVEFORMATEXTENSIBLE {
+    const CHANNELS: u16 = 2;
+    const SAMPLE_RATE: u32 = 48_000;
+    const BITS: u16 = 32;
+    let block_align = CHANNELS * BITS / 8;
 
-    let format_ptr = unsafe { client.GetMixFormat()? };
-    let outcome = unsafe { stream_with_format(client, format_ptr, shared) };
-    unsafe { CoTaskMemFree(Some(format_ptr as *const c_void)) };
-    outcome
+    let mut format: WAVEFORMATEXTENSIBLE = unsafe { std::mem::zeroed() };
+    format.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE_TAG;
+    format.Format.nChannels = CHANNELS;
+    format.Format.nSamplesPerSec = SAMPLE_RATE;
+    format.Format.nAvgBytesPerSec = SAMPLE_RATE * block_align as u32;
+    format.Format.nBlockAlign = block_align;
+    format.Format.wBitsPerSample = BITS;
+    format.Format.cbSize = (size_of::<WAVEFORMATEXTENSIBLE>() - size_of::<WAVEFORMATEX>()) as u16;
+    format.Samples.wValidBitsPerSample = BITS;
+    format.dwChannelMask = 0x3;
+    format.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+    format
 }
 
-unsafe fn stream_with_format(
-    client: &IAudioClient,
-    format_ptr: *mut WAVEFORMATEX,
-    shared: &Shared,
-) -> Result<()> {
-    let format = unsafe { *format_ptr };
-    if !is_float_format(&format) {
-        return Err(Error::from_hresult(AUDCLNT_E_UNSUPPORTED_FORMAT));
-    }
+/// Configures the activated client and runs the capture loop.
+fn stream(client: &IAudioClient, shared: &Shared) -> Result<()> {
+    let mut format = capture_format();
+    let channels = format.Format.nChannels;
+    let sample_rate = format.Format.nSamplesPerSec;
+    let format_ptr: *mut WAVEFORMATEX = &mut format.Format;
 
     // Auto reset: the audio engine signals this handle for every packet but
     // never resets it, so the capture thread owns the reset.
     let sample_event = unsafe { CreateEventW(None, false, false, PCWSTR::null())? };
-    let outcome = stream_packets(client, &format, format_ptr, sample_event, shared);
+    let outcome = stream_packets(client, format_ptr, sample_event, channels, sample_rate, shared);
     let _ = unsafe { CloseHandle(sample_event) };
     outcome
 }
 
 fn stream_packets(
     client: &IAudioClient,
-    format: &WAVEFORMATEX,
     format_ptr: *mut WAVEFORMATEX,
     sample_event: HANDLE,
+    channels: u16,
+    sample_rate: u32,
     shared: &Shared,
 ) -> Result<()> {
     let flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
@@ -321,7 +330,7 @@ fn stream_packets(
         if unsafe { WaitForMultipleObjects(&handles, false, WAIT_SLICE_MS) } == WAIT_OBJECT_0 {
             break;
         }
-        if let Err(error) = drain(&capture, format, shared, &mut silence) {
+        if let Err(error) = drain(&capture, channels, sample_rate, shared, &mut silence) {
             let _ = unsafe { client.Stop() };
             return Err(error);
         }
@@ -334,13 +343,11 @@ fn stream_packets(
 /// Delivers every pending packet to the user callback.
 fn drain(
     capture: &IAudioCaptureClient,
-    format: &WAVEFORMATEX,
+    channels: u16,
+    sample_rate: u32,
     shared: &Shared,
     silence: &mut Vec<f32>,
 ) -> Result<()> {
-    let channels = format.nChannels as usize;
-    let sample_rate = format.nSamplesPerSec;
-
     loop {
         if unsafe { capture.GetNextPacketSize()? } == 0 {
             break;
@@ -352,7 +359,7 @@ fn drain(
         unsafe { capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None)? };
 
         if frames > 0 {
-            let count = frames as usize * channels;
+            let count = frames as usize * channels as usize;
             let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0;
 
             if silent || data.is_null() {
@@ -364,7 +371,7 @@ fn drain(
                     (shared.callback)(
                         silence.as_ptr(),
                         frames,
-                        format.nChannels,
+                        channels,
                         sample_rate,
                         shared.user_data,
                     )
@@ -375,7 +382,7 @@ fn drain(
                     (shared.callback)(
                         samples.as_ptr(),
                         frames,
-                        format.nChannels,
+                        channels,
                         sample_rate,
                         shared.user_data,
                     )
@@ -387,21 +394,6 @@ fn drain(
     }
 
     Ok(())
-}
-
-/// Process loopback only supports 32-bit IEEE float PCM.
-fn is_float_format(format: &WAVEFORMATEX) -> bool {
-    if format.wFormatTag == WAVE_FORMAT_IEEE_FLOAT as u16 {
-        return true;
-    }
-    if format.wFormatTag == WAVE_FORMAT_EXTENSIBLE_TAG {
-        // Both structures are packed, so read the subformat through the raw
-        // pointer instead of forming a reference to a possibly unaligned field.
-        let extensible = format as *const WAVEFORMATEX as *const WAVEFORMATEXTENSIBLE;
-        let sub_format = unsafe { ptr::addr_of!((*extensible).SubFormat).read_unaligned() };
-        return sub_format == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
-    }
-    false
 }
 
 fn log_error(what: &str, error: &Error) {
